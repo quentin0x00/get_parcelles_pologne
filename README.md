@@ -18,9 +18,7 @@ Ecoute les notifications d'un canal PostgreSQL (table temp de requetage) afin d'
 
 ## 🌐 API utilisée
 
-Le code interroge cette API publique polonaise :
-
-**ULDK – Usługa Lokalizacji Działek Katastralnych**  
-📍 URL : `https://uldk.gugik.gov.pl/?request=GetParcelByXY`  
+Le code interroge cette API publique polonaise : 
+URL : `https://uldk.gugik.gov.pl/?request=GetParcelByXY`  
 
 ---
