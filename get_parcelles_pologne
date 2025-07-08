@@ -1,0 +1,89 @@
+import logging
+import re
+import requests
+import psycopg2
+from shapely.wkb import loads
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from sqlalchemy import create_engine, text
+from config import DB_CONFIG
+
+def pg_connexion():
+    engine = create_engine(
+        f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+    )
+    listen_canal = psycopg2.connect(**DB_CONFIG)
+    listen_canal.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    curseur = listen_canal.cursor()
+    curseur.execute("LISTEN table_updates;")
+    return engine, listen_canal
+
+def select_initial_xy(engine):
+    requete = """
+    SELECT ST_AsText(ST_Transform((ST_DumpPoints(geom)).geom, 2180)) AS coordonnees
+    FROM parcels.get_parcels;
+    """
+    with engine.connect() as connexion:
+        resultat = connexion.execute(text(requete))
+        lignes = resultat.fetchall()
+    return [coord.split() for ligne in lignes for coord in re.findall(r'(\d+\.\d+ \d+\.\d+)', ligne[0])]
+
+def get_api_response(x, y):
+    url_base = "https://uldk.gugik.gov.pl/?request=GetParcelByXY"
+    url_complete = f"{url_base}&xy={round(x,1)},{round(y,1)}&result=teryt,voivodeship,county,commune,region,parcel,geom_wkb"
+    reponse = requests.get(url_complete)
+    if not reponse.ok:
+        raise Exception(f"Échec de l'appel API pour ({x}, {y})")
+    return reponse.text.strip()[1:].split('|')
+
+def insert_parcelle(engine, donnees_parcelle):
+    parcel_id, voievodie, district, commune, region, short_id, geom_hex = donnees_parcelle
+    geom = loads(bytes.fromhex(geom_hex)).wkt
+    requete = text("""
+        INSERT INTO parcels.parcels (geom, parcel_id, voivodeship, county, commune, region, short_id)
+        VALUES (
+            ST_Transform(ST_SetSRID(ST_GeomFromEWKT(:geom), 2180), 3857),
+            :identifiant, :voievodie, :district, :commune, :region, :identifiant_court
+        )
+    """)
+    with engine.begin() as connexion:
+        connexion.execute(requete, {
+            "geom": geom,
+            "parcel_id": parcel_id,
+            "voievodie": voievodie,
+            "district": district,
+            "commune": commune,
+            "region": region,
+            "short_id": short_id
+        })
+
+def vider_table_temp(engine):
+    with engine.begin() as connexion:
+        connexion.execute(text("DELETE FROM parcels.get_parcels;"))
+
+def traiter_parcelles(engine):
+    liste_coordonnees = select_initial_xy(engine)
+    for coord in liste_coordonnees:
+        try:
+            x, y = map(float, coord)
+            donnees = get_api_response(x, y)
+            insert_parcelle(engine, donnees)
+        except Exception as erreur:
+            logging.error(f"Erreur lors du traitement du point {coord} : {str(erreur)}")
+    vider_table_temp(engine)
+
+def main():
+    engine, listen_canal = pg_connexion()
+    try:
+        while True:
+            listen_canal.poll()
+            while listen_canal.notifies:
+                notification = listen_canal.notifies.pop(0)
+                print("Notification reçue :", notification.payload)
+                logging.info(f"Notification reçue : {notification.payload}")
+                traiter_parcelles(engine)
+                print("Requête traitée.")
+    finally:
+        listen_canal.close()
+
+if __name__ == '__main__':
+    main()
